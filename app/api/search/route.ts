@@ -1,82 +1,77 @@
-import { NextResponse } from 'next/server';
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { NextResponse } from "next/server";
 
+// 1. Securely get the API Key
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-export async function POST(request: Request) {
-    try {
-        const { query } = await request.json();
-        console.log(`[Server] Searching for: ${query}`);
+if (!GEMINI_API_KEY) {
+  throw new Error("Missing GEMINI_API_KEY in environment variables");
+}
 
-        // --- STEP 1: AUTO-DISCOVERY (The "Out of Box" Solution) ---
-        // Instead of guessing "gemini-pro", we ASK Google what is available for this key.
-        const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`;
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-        const listResponse = await fetch(listUrl);
+export async function POST(req: Request) {
+  try {
+    const { query } = await req.json();
 
-        if (!listResponse.ok) {
-            const errorText = await listResponse.text();
-            throw new Error(`Failed to fetch model list: ${errorText}`);
-        }
-
-        const listData = await listResponse.json();
-
-        // Find a model that supports 'generateContent' and is a Gemini model
-        const validModel = listData.models?.find((m: any) =>
-            m.name.includes("gemini") &&
-            m.supportedGenerationMethods.includes("generateContent")
-        );
-
-        if (!validModel) {
-            throw new Error("No Gemini models found for this API Key.");
-        }
-
-        const modelName = validModel.name; // e.g., "models/gemini-1.5-flash-001"
-        console.log(`[Server] Auto-Detected Valid Model: ${modelName}`);
-
-        // --- STEP 2: EXECUTION ---
-        // Now we use the EXACT model name Google gave us. No more 404s.
-        const generateUrl = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
-
-        const genResponse = await fetch(generateUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{
-                    parts: [{
-                        text: `
-                        Return strictly valid JSON. 
-                        List top 8 official software tools for: "${query}".
-                        Prioritize Industry Standards.
-                        Format: { "summary": "...", "tools": [{ "title": "...", "url": "...", "description": "...", "isFree": false, "isOfficial": true }] }
-                        `
-                    }]
-                }]
-            })
-        });
-
-        if (!genResponse.ok) {
-            const errorText = await genResponse.text();
-            throw new Error(`Generation Failed: ${errorText}`);
-        }
-
-        const data = await genResponse.json();
-        const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-
-        // Clean JSON
-        let cleanText = rawText.replace(/```json/g, '').replace(/```/g, '');
-        const firstBrace = cleanText.indexOf('{');
-        const lastBrace = cleanText.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace !== -1) {
-            cleanText = cleanText.substring(firstBrace, lastBrace + 1);
-        }
-
-        return NextResponse.json(JSON.parse(cleanText));
-
-    } catch (error: any) {
-        console.error("CRITICAL ERROR:", error);
-        return NextResponse.json({
-            error: "System Error",
-            details: error.message
-        }, { status: 500 });
+    if (!query) {
+      return NextResponse.json({ error: "Query is required" }, { status: 400 });
     }
+
+    const prompt = `
+      You are an expert software engineer and tech consultant.
+      User is looking for: "${query}"
+      
+      List 5 to 7 of the best, industry-standard software tools or websites for this specific task.
+      Include a mix of premium (industry standard) and free/open-source options.
+      
+      Return ONLY a valid JSON object with this exact structure:
+      {
+        "summary": "A 2-sentence explanation of what these tools are generally used for.",
+        "tools": [
+          {
+            "title": "Tool Name",
+            "url": "Official Website URL",
+            "description": "Short 1-sentence description of what it does.",
+            "isFree": true/false,
+            "isOfficial": true/false
+          }
+        ]
+      }
+      Do not include markdown formatting like \`\`\`json. Just the raw JSON string.
+    `;
+
+    let textResponse = "";
+
+    // --- SMART FALLBACK SYSTEM ---
+    try {
+      console.log("Attempting to use Gemini 1.5 PRO...");
+      const modelPro = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+      const result = await modelPro.generateContent(prompt);
+      textResponse = result.response.text();
+      console.log("Success with PRO model.");
+    } catch (proError) {
+      console.warn("Pro model failed or limit reached. Switching to FLASH fallback...");
+      
+      // If Pro fails, we immediately try Flash
+      const modelFlash = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const result = await modelFlash.generateContent(prompt);
+      textResponse = result.response.text();
+      console.log("Success with FLASH model.");
+    }
+    // -----------------------------
+
+    // Clean up response
+    const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+    const data = JSON.parse(cleanJson);
+
+    return NextResponse.json(data);
+
+  } catch (error: any) {
+    console.error("Search API Error:", error);
+    return NextResponse.json(
+      { error: "Failed to generate results", details: error.message },
+      { status: 500 }
+    );
+  }
 }
