@@ -9,8 +9,7 @@ if (!GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// --- 1. DYNAMIC MODEL FINDER ---
-// This prevents the 404 error by getting the EXACT name from Google
+// --- HELPER: Find the NEWEST working models ---
 async function getModelIds(apiKey: string) {
   try {
     const response = await fetch(
@@ -18,29 +17,38 @@ async function getModelIds(apiKey: string) {
     );
     const data = await response.json();
 
-    // Safety: If the API call itself fails, we must use a fallback
+    // 1. If API fails, use the NEW STANDARD defaults (Gemini 2.5)
     if (!data.models) {
-        console.warn("⚠️ Failed to list models. Using hardcoded defaults.");
-        return { pro: "gemini-1.5-pro", flash: "gemini-1.5-flash" }; 
+        console.warn("⚠️ Failed to list models. Using Gemini 2.5 defaults.");
+        return { pro: "gemini-2.5-pro", flash: "gemini-2.5-flash" }; 
     }
 
     const validModels = data.models.filter((m: any) => 
         m.supportedGenerationMethods.includes("generateContent")
     );
 
-    // We find the names that Google actually returned
-    const pro = validModels.find((m: any) => m.name.includes("gemini-1.5-pro"))?.name.replace("models/", "");
-    const flash = validModels.find((m: any) => m.name.includes("gemini-1.5-flash"))?.name.replace("models/", "");
+    // 2. SEARCH STRATEGY: Look for 2.5 -> 2.0 -> 1.5
+    // We want the newest version available to your key.
     
-    // Return the valid, Google-confirmed IDs
+    // Helper to find model by partial name
+    const find = (str: string) => validModels.find((m: any) => m.name.includes(str))?.name.replace("models/", "");
+
+    // Priority List for PRO
+    const pro = find("gemini-2.5-pro") || find("gemini-2.0-pro") || find("gemini-1.5-pro");
+
+    // Priority List for FLASH
+    const flash = find("gemini-2.5-flash") || find("gemini-2.0-flash") || find("gemini-1.5-flash");
+    
+    // 3. FINAL FALLBACKS (If your key is very old or very new)
+    // If we found nothing, we guess 'gemini-2.5-flash' because 1.5 is retired.
     return { 
-      pro: pro || "gemini-1.5-pro", 
-      flash: flash || "gemini-1.5-flash" 
+      pro: pro || "gemini-2.5-flash", 
+      flash: flash || "gemini-2.5-flash" 
     };
 
   } catch (e) {
-    console.warn("⚠️ Network error listing models. Using defaults.");
-    return { pro: "gemini-1.5-pro", flash: "gemini-1.5-flash" };
+    console.warn("⚠️ Network error listing models. Using Gemini 2.5 defaults.");
+    return { pro: "gemini-2.5-flash", flash: "gemini-2.5-flash" };
   }
 }
 
@@ -52,10 +60,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Query is required" }, { status: 400 });
     }
 
-    // --- 2. GET CONFIRMED IDs BEFORE STARTING ---
-    // We get both IDs now, so we know the fallback is valid too.
+    // --- 1. GET MODEL IDS (Will pick 2.5 or 2.0) ---
     const modelIds = await getModelIds(GEMINI_API_KEY!);
-    console.log(`✅ Using Validated Models -> Primary: ${modelIds.pro} | Fallback: ${modelIds.flash}`);
+    console.log(`✅ Using Models -> Primary: ${modelIds.pro} | Fallback: ${modelIds.flash}`);
 
     const prompt = `
       You are an expert software engineer.
@@ -70,22 +77,18 @@ export async function POST(req: Request) {
 
     let textResponse = "";
 
-    // --- 3. TRY PRIMARY (PRO) ---
+    // --- 2. EXECUTE WITH PRIMARY ---
     try {
-        console.log(`🚀 Attempting Primary Model (${modelIds.pro})...`);
         const modelPro = genAI.getGenerativeModel({ model: modelIds.pro });
         const result = await modelPro.generateContent(prompt);
         textResponse = result.response.text();
-        console.log("✅ Success with Primary.");
     } catch (proError: any) {
-        // --- 4. FALLBACK TO SECONDARY (FLASH) ---
-        // We use 'modelIds.flash' which we already verified exists in step 1
-        console.warn(`⚠️ Primary failed (Quota/Error). Switching to Fallback (${modelIds.flash})...`);
+        console.warn(`⚠️ Primary model (${modelIds.pro}) failed. Switching to Fallback (${modelIds.flash})...`);
         
+        // --- 3. EXECUTE WITH FALLBACK ---
         const modelFlash = genAI.getGenerativeModel({ model: modelIds.flash });
         const result = await modelFlash.generateContent(prompt);
         textResponse = result.response.text();
-        console.log("✅ Success with Fallback.");
     }
 
     const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
