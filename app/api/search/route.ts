@@ -9,46 +9,47 @@ if (!GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// --- HELPER: Find the NEWEST working models ---
-async function getModelIds(apiKey: string) {
+// --- 1. DYNAMIC MODEL DISCOVERY ---
+// This prevents "404 Not Found" by asking Google for the correct names.
+async function getWorkingModelIds(apiKey: string) {
   try {
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
     );
     const data = await response.json();
 
-    // 1. If API fails, use the NEW STANDARD defaults (Gemini 2.5)
+    // Safety fallback if the API list fails
     if (!data.models) {
-        console.warn("⚠️ Failed to list models. Using Gemini 2.5 defaults.");
-        return { pro: "gemini-2.5-pro", flash: "gemini-2.5-flash" }; 
+        console.warn("⚠️ Failed to list models. Using defaults.");
+        return [ "gemini-1.5-flash", "gemini-1.5-pro" ]; 
     }
 
     const validModels = data.models.filter((m: any) => 
         m.supportedGenerationMethods.includes("generateContent")
     );
 
-    // 2. SEARCH STRATEGY: Look for 2.5 -> 2.0 -> 1.5
-    // We want the newest version available to your key.
-    
-    // Helper to find model by partial name
-    const find = (str: string) => validModels.find((m: any) => m.name.includes(str))?.name.replace("models/", "");
+    // Helper to find a model ID by a keyword (e.g., "pro" or "flash")
+    const find = (keyword: string) => 
+        validModels.find((m: any) => m.name.includes(keyword))?.name.replace("models/", "");
 
-    // Priority List for PRO
-    const pro = find("gemini-2.5-pro") || find("gemini-2.0-pro") || find("gemini-1.5-pro");
+    // We build a list of valid IDs found in your account
+    // It prioritizes finding a "Pro" model, then a "Flash" model.
+    const detectedPro = find("pro");   // e.g., gemini-1.5-pro-latest
+    const detectedFlash = find("flash"); // e.g., gemini-1.5-flash-001
 
-    // Priority List for FLASH
-    const flash = find("gemini-2.5-flash") || find("gemini-2.0-flash") || find("gemini-1.5-flash");
+    // Return a clean list of models that DEFINITELY exist
+    const strategies = [];
+    if (detectedFlash) strategies.push(detectedFlash); // Try Flash first (faster/cheaper)
+    if (detectedPro) strategies.push(detectedPro);     // Try Pro if Flash fails
     
-    // 3. FINAL FALLBACKS (If your key is very old or very new)
-    // If we found nothing, we guess 'gemini-2.5-flash' because 1.5 is retired.
-    return { 
-      pro: pro || "gemini-2.5-flash", 
-      flash: flash || "gemini-2.5-flash" 
-    };
+    // Add defaults just in case discovery missed something
+    if (strategies.length === 0) return ["gemini-1.5-flash", "gemini-1.5-pro"];
+    
+    return strategies;
 
   } catch (e) {
-    console.warn("⚠️ Network error listing models. Using Gemini 2.5 defaults.");
-    return { pro: "gemini-2.5-flash", flash: "gemini-2.5-flash" };
+    console.warn("⚠️ Network error listing models. Using safe defaults.");
+    return ["gemini-1.5-flash", "gemini-1.5-pro"];
   }
 }
 
@@ -60,9 +61,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Query is required" }, { status: 400 });
     }
 
-    // --- 1. GET MODEL IDS (Will pick 2.5 or 2.0) ---
-    const modelIds = await getModelIds(GEMINI_API_KEY!);
-    console.log(`✅ Using Models -> Primary: ${modelIds.pro} | Fallback: ${modelIds.flash}`);
+    // 1. Get the list of VALID models for your key
+    const modelList = await getWorkingModelIds(GEMINI_API_KEY!);
+    console.log(`✅ Strategy: Will try these models in order: ${modelList.join(" -> ")}`);
 
     const prompt = `
       You are an expert software engineer.
@@ -76,19 +77,36 @@ export async function POST(req: Request) {
     `;
 
     let textResponse = "";
+    let success = false;
+    let lastError = "";
 
-    // --- 2. EXECUTE WITH PRIMARY ---
-    try {
-        const modelPro = genAI.getGenerativeModel({ model: modelIds.pro });
-        const result = await modelPro.generateContent(prompt);
-        textResponse = result.response.text();
-    } catch (proError: any) {
-        console.warn(`⚠️ Primary model (${modelIds.pro}) failed. Switching to Fallback (${modelIds.flash})...`);
-        
-        // --- 3. EXECUTE WITH FALLBACK ---
-        const modelFlash = genAI.getGenerativeModel({ model: modelIds.flash });
-        const result = await modelFlash.generateContent(prompt);
-        textResponse = result.response.text();
+    // 2. THE LOOP (Solves the Quota/429 Error)
+    // It iterates through your valid models. If one fails, it tries the next.
+    for (const modelName of modelList) {
+        try {
+            console.log(`🔄 Attempting Model: ${modelName}...`);
+            const model = genAI.getGenerativeModel({ model: modelName });
+            
+            const result = await model.generateContent(prompt);
+            textResponse = result.response.text();
+            
+            console.log(`✅ Success with ${modelName}!`);
+            success = true;
+            break; // Stop the loop, we got our answer
+
+        } catch (error: any) {
+            console.warn(`⚠️ ${modelName} Failed: ${error.message.split(' ')[0]}`);
+            lastError = error.message;
+            // The loop will automatically try the next model in 'modelList'
+        }
+    }
+
+    if (!success) {
+        console.error("❌ All models failed.");
+        return NextResponse.json(
+            { error: "Service busy. Please try again.", details: lastError },
+            { status: 503 }
+        );
     }
 
     const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
@@ -97,7 +115,7 @@ export async function POST(req: Request) {
     return NextResponse.json(data);
 
   } catch (error: any) {
-    console.error("❌ Search API Fatal Error:", error);
+    console.error("❌ API Error:", error);
     return NextResponse.json(
       { error: "Failed to generate results", details: error.message },
       { status: 500 }
