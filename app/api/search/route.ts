@@ -9,8 +9,8 @@ if (!GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// --- 1. DYNAMIC MODEL DISCOVERY ---
-// This prevents "404 Not Found" by asking Google for the correct names.
+// --- 1. DYNAMIC MODEL DISCOVERY (Your Strategy) ---
+// Fetches only valid models for this Key. Prevents guessing wrong names.
 async function getWorkingModelIds(apiKey: string) {
   try {
     const response = await fetch(
@@ -18,37 +18,29 @@ async function getWorkingModelIds(apiKey: string) {
     );
     const data = await response.json();
 
-    // Safety fallback if the API list fails
     if (!data.models) {
-        console.warn("⚠️ Failed to list models. Using defaults.");
-        return [ "gemini-1.5-flash", "gemini-1.5-pro" ]; 
+      console.warn("⚠️ API list failed. Using safe fallback.");
+      return ["gemini-1.5-flash", "gemini-1.5-pro"];
     }
 
-    const validModels = data.models.filter((m: any) => 
-        m.supportedGenerationMethods.includes("generateContent")
-    );
+    // Filter: Only models that support "generateContent"
+    const validModels = data.models
+      .filter((m: any) => m.supportedGenerationMethods.includes("generateContent"))
+      .map((m: any) => m.name.replace("models/", "")); // CRITICAL: Remove 'models/' prefix
 
-    // Helper to find a model ID by a keyword (e.g., "pro" or "flash")
-    const find = (keyword: string) => 
-        validModels.find((m: any) => m.name.includes(keyword))?.name.replace("models/", "");
+    // Sort Strategy: Put "flash" models first (cheaper/faster), then "pro"
+    const sortedModels = validModels.sort((a: string, b: string) => {
+      if (a.includes("flash") && !b.includes("flash")) return -1; // Flash comes first
+      if (!a.includes("flash") && b.includes("flash")) return 1;
+      return 0;
+    });
 
-    // We build a list of valid IDs found in your account
-    // It prioritizes finding a "Pro" model, then a "Flash" model.
-    const detectedPro = find("pro");   // e.g., gemini-1.5-pro-latest
-    const detectedFlash = find("flash"); // e.g., gemini-1.5-flash-001
-
-    // Return a clean list of models that DEFINITELY exist
-    const strategies = [];
-    if (detectedFlash) strategies.push(detectedFlash); // Try Flash first (faster/cheaper)
-    if (detectedPro) strategies.push(detectedPro);     // Try Pro if Flash fails
-    
-    // Add defaults just in case discovery missed something
-    if (strategies.length === 0) return ["gemini-1.5-flash", "gemini-1.5-pro"];
-    
-    return strategies;
+    console.log("📋 Google confirmed these models exist:", sortedModels);
+    return sortedModels;
 
   } catch (e) {
-    console.warn("⚠️ Network error listing models. Using safe defaults.");
+    console.error("⚠️ Network error listing models:", e);
+    // If fetch fails, we must return a safe fallback to prevent crash
     return ["gemini-1.5-flash", "gemini-1.5-pro"];
   }
 }
@@ -61,10 +53,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Query is required" }, { status: 400 });
     }
 
-    // 1. Get the list of VALID models for your key
+    // 1. Fetch the CORRECT model names from Google first
     const modelList = await getWorkingModelIds(GEMINI_API_KEY!);
-    console.log(`✅ Strategy: Will try these models in order: ${modelList.join(" -> ")}`);
-
+    
     const prompt = `
       You are an expert software engineer.
       User is looking for: "${query}"
@@ -80,8 +71,8 @@ export async function POST(req: Request) {
     let success = false;
     let lastError = "";
 
-    // 2. THE LOOP (Solves the Quota/429 Error)
-    // It iterates through your valid models. If one fails, it tries the next.
+    // 2. THE LOOP (Dynamic Fallback)
+    // We iterate through the list Google gave us.
     for (const modelName of modelList) {
         try {
             console.log(`🔄 Attempting Model: ${modelName}...`);
@@ -92,26 +83,36 @@ export async function POST(req: Request) {
             
             console.log(`✅ Success with ${modelName}!`);
             success = true;
-            break; // Stop the loop, we got our answer
+            break; // Stop loop on success
 
         } catch (error: any) {
-            console.warn(`⚠️ ${modelName} Failed: ${error.message.split(' ')[0]}`);
+            console.warn(`⚠️ ${modelName} Failed: ${error.message}`);
             lastError = error.message;
-            // The loop will automatically try the next model in 'modelList'
+            // Loop automatically tries the next model in 'modelList'
         }
     }
 
     if (!success) {
-        console.error("❌ All models failed.");
         return NextResponse.json(
             { error: "Service busy. Please try again.", details: lastError },
             { status: 503 }
         );
     }
 
-    const cleanJson = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-    const data = JSON.parse(cleanJson);
+    // 3. Clean and Parse JSON
+    const cleanJson = textResponse
+        .replace(/```json/g, '')
+        .replace(/```/g, '')
+        .trim();
+    
+    // Extract JSON between braces just in case of extra text
+    const firstBrace = cleanJson.indexOf('{');
+    const lastBrace = cleanJson.lastIndexOf('}');
+    const finalJsonString = (firstBrace !== -1 && lastBrace !== -1) 
+        ? cleanJson.substring(firstBrace, lastBrace + 1)
+        : cleanJson;
 
+    const data = JSON.parse(finalJsonString);
     return NextResponse.json(data);
 
   } catch (error: any) {
