@@ -9,7 +9,7 @@ if (!GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// --- 1. DYNAMIC MODEL DISCOVERY (Your Strategy) ---
+// --- 1. DYNAMIC MODEL DISCOVERY (INTELLIGENCE FIRST) ---
 // Fetches only valid models for this Key. Prevents guessing wrong names.
 async function getWorkingModelIds(apiKey: string) {
   try {
@@ -20,7 +20,8 @@ async function getWorkingModelIds(apiKey: string) {
 
     if (!data.models) {
       console.warn("⚠️ API list failed. Using safe fallback.");
-      return ["gemini-1.5-flash", "gemini-1.5-pro"];
+      // Fallback Strategy: Pro First, then Flash
+      return ["gemini-1.5-pro", "gemini-1.5-flash"];
     }
 
     // Filter: Only models that support "generateContent"
@@ -28,20 +29,28 @@ async function getWorkingModelIds(apiKey: string) {
       .filter((m: any) => m.supportedGenerationMethods.includes("generateContent"))
       .map((m: any) => m.name.replace("models/", "")); // CRITICAL: Remove 'models/' prefix
 
-    // Sort Strategy: Put "flash" models first (cheaper/faster), then "pro"
+    // --- SORT STRATEGY: PRO FIRST ---
+    // 1. "Pro" models go to the TOP (Smarter)
+    // 2. "Flash" models go to the BOTTOM (Faster/Cheaper)
     const sortedModels = validModels.sort((a: string, b: string) => {
-      if (a.includes("flash") && !b.includes("flash")) return -1; // Flash comes first
-      if (!a.includes("flash") && b.includes("flash")) return 1;
+      const aIsPro = a.includes("pro");
+      const bIsPro = b.includes("pro");
+
+      if (aIsPro && !bIsPro) return -1; // 'a' is Pro, put it first
+      if (!aIsPro && bIsPro) return 1;  // 'b' is Pro, put it first
+      
+      // Secondary sort: If both are same type, newer versions (usually longer names or containing 'latest') first?
+      // For now, keep it simple.
       return 0;
     });
 
-    console.log("📋 Google confirmed these models exist:", sortedModels);
+    console.log("📋 Google confirmed these models exist (Priority Order):", sortedModels);
     return sortedModels;
 
   } catch (e) {
     console.error("⚠️ Network error listing models:", e);
     // If fetch fails, we must return a safe fallback to prevent crash
-    return ["gemini-1.5-flash", "gemini-1.5-pro"];
+    return ["gemini-1.5-pro", "gemini-1.5-flash"];
   }
 }
 
@@ -86,7 +95,7 @@ export async function POST(req: Request) {
             break; // Stop loop on success
 
         } catch (error: any) {
-            console.warn(`⚠️ ${modelName} Failed: ${error.message}`);
+            console.warn(`⚠️ ${modelName} Failed: ${error.message.split(' ')[0]}`);
             lastError = error.message;
             // Loop automatically tries the next model in 'modelList'
         }
