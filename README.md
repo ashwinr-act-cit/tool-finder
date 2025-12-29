@@ -1,36 +1,64 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+#> Tool Finder
 
-## Getting Started
+A web application that helps users discover software tools based on specific requirements. It utilizes the Google Gemini API to parse natural language queries and returns structured recommendations for relevant software.
 
-First, run the development server:
+**Live Demo:** https://tools-finder.me
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+##> Project Overview
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+This project solves the problem of finding specific software for niche use cases (e.g., "video editing software for 4GB RAM laptops"). Instead of generic search results, it uses a Large Language Model (LLM) to generate a JSON-structured list of tools with descriptions, licensing information, and official links.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The backend is built on Next.js API routes and implements a custom robust error-handling strategy to manage API quotas and model availability.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+##> Tech Stack
 
-## Learn More
+* **Frontend:** Next.js (React), Tailwind CSS
+* **Backend:** Next.js Serverless Functions
+* **AI Integration:** Google Generative AI SDK (Gemini)
+* **Hosting:** Vercel
+* **DNS/Domain:** Namecheap
 
-To learn more about Next.js, take a look at the following resources:
+##> Key Features
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+* **Intelligent Model Selection:** The application dynamically queries available models associated with the API key.
+* **Fallback Logic:** It prioritizes high-intelligence models (Gemini 1.5 Pro) for better accuracy. If the primary model fails due to rate limits or timeouts, the system automatically degrades to faster, lighter models (Gemini 1.5 Flash) to ensure a response is always generated.
+* **JSON Enforcement:** The prompt engineering ensures the AI outputs strictly formatted JSON, preventing frontend parsing errors.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+##> Installation & Setup
 
-## Deploy on Vercel
+1.  **Clone the repository**
+    ```bash
+    git clone [https://github.com/ashwin07/tools-finder.git](https://github.com/ashwin07/tools-finder.git)
+    cd tools-finder
+    ```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+2.  **Install dependencies**
+    ```bash
+    npm install
+    ```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+3.  **Environment Configuration**
+    Create a `.env.local` file in the root directory and add your Google Gemini API key:
+    ```bash
+    GEMINI_API_KEY=your_api_key_here
+    ```
+
+4.  **Run the development server**
+    ```bash
+    npm run dev
+    ```
+
+5.  **Access the application**
+    Open http://localhost:3000 in your browser.
+
+##> How It Works
+
+1.  **User Input:** The user types a query into the search bar.
+2.  **API Route:** The request is sent to the `/api/generate` endpoint.
+3.  **Model Discovery:** The server checks which Gemini models are active and sorts them by capability (Intelligence > Speed).
+4.  **Generation Loop:** The system attempts to generate a response using the first model. If it encounters a 429 (Quota Exceeded) or 503 (Overloaded) error, it logs the warning and immediately retries with the next model in the priority list.
+5.  **Response:** The raw text is cleaned to remove markdown formatting, parsed into JSON, and sent back to the frontend for rendering.
+
+##> License
+
+This project is open source and available under the MIT License.
