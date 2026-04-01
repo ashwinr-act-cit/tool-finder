@@ -9,70 +9,103 @@ if (!GEMINI_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// --- 1. DYNAMIC MODEL DISCOVERY (INTELLIGENCE FIRST) ---
-// Fetches only valid models for this Key. Prevents guessing wrong names.
-async function getWorkingModelIds(apiKey: string) {
+// --- Type Definitions (replaces unsafe `any`) ---
+interface GeminiModel {
+  name: string;
+  supportedGenerationMethods: string[];
+}
+
+interface GeminiModelListResponse {
+  models?: GeminiModel[];
+}
+
+// --- Model List Cache ---
+// Fetched once per server lifecycle instead of on every request
+let cachedModels: string[] | null = null;
+
+async function getWorkingModelIds(apiKey: string): Promise<string[]> {
+  // Return cached result if available
+  if (cachedModels) return cachedModels;
+
   try {
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
     );
-    const data = await response.json();
+    const data: GeminiModelListResponse = await response.json();
 
     if (!data.models) {
       console.warn("⚠️ API list failed. Using safe fallback.");
-      // Fallback Strategy: Pro First, then Flash
       return ["gemini-1.5-pro", "gemini-1.5-flash"];
     }
 
-    // Filter: Only models that support "generateContent"
     const validModels = data.models
-      .filter((m: any) => m.supportedGenerationMethods.includes("generateContent"))
-      .map((m: any) => m.name.replace("models/", "")); // CRITICAL: Remove 'models/' prefix
+      .filter((m) => m.supportedGenerationMethods.includes("generateContent"))
+      .map((m) => m.name.replace("models/", ""));
 
-    // --- SORT STRATEGY: PRO FIRST ---
-    // 1. "Pro" models go to the TOP (Smarter)
-    // 2. "Flash" models go to the BOTTOM (Faster/Cheaper)
-    const sortedModels = validModels.sort((a: string, b: string) => {
+    // Sort: Pro models first (smarter), Flash models second (faster)
+    const sortedModels = validModels.sort((a, b) => {
       const aIsPro = a.includes("pro");
       const bIsPro = b.includes("pro");
-
-      if (aIsPro && !bIsPro) return -1; // 'a' is Pro, put it first
-      if (!aIsPro && bIsPro) return 1;  // 'b' is Pro, put it first
-      
-      // Secondary sort: If both are same type, newer versions (usually longer names or containing 'latest') first?
-      // For now, keep it simple.
+      if (aIsPro && !bIsPro) return -1;
+      if (!aIsPro && bIsPro) return 1;
       return 0;
     });
 
-    console.log("📋 Google confirmed these models exist (Priority Order):", sortedModels);
-    return sortedModels;
-
+    console.log("📋 Models confirmed (priority order):", sortedModels);
+    cachedModels = sortedModels;
+    return cachedModels;
   } catch (e) {
     console.error("⚠️ Network error listing models:", e);
-    // If fetch fails, we must return a safe fallback to prevent crash
     return ["gemini-1.5-pro", "gemini-1.5-flash"];
   }
 }
 
 export async function POST(req: Request) {
   try {
-    const { query } = await req.json();
+    const body = await req.json();
+    const { query } = body;
 
-    if (!query) {
-      return NextResponse.json({ error: "Query is required" }, { status: 400 });
+    // --- Input Validation ---
+    if (!query || typeof query !== "string") {
+      return NextResponse.json(
+        { error: "Query is required and must be a string" },
+        { status: 400 }
+      );
     }
 
-    // 1. Fetch the CORRECT model names from Google first
+    // Prevent extremely long inputs from blowing up token usage
+    if (query.trim().length === 0 || query.length > 300) {
+      return NextResponse.json(
+        { error: "Query must be between 1 and 300 characters" },
+        { status: 400 }
+      );
+    }
+
+    // Basic sanitization to reduce prompt injection risk
+    const sanitizedQuery = query
+      .replace(/[`"\\]/g, "")
+      .trim()
+      .slice(0, 300);
+
     const modelList = await getWorkingModelIds(GEMINI_API_KEY!);
-    
+
     const prompt = `
       You are an expert software engineer.
-      User is looking for: "${query}"
-      List 5 to 7 best software tools.
-      Return ONLY valid JSON.
+      The user is looking for tools that help with: "${sanitizedQuery}"
+      List 5 to 7 of the best software tools for this use case.
+      Return ONLY valid JSON with no markdown or extra text.
+      Format:
       {
-        "summary": "...",
-        "tools": [{ "title": "...", "url": "...", "description": "...", "isFree": true, "isOfficial": true }]
+        "summary": "Brief explanation of the tools category",
+        "tools": [
+          {
+            "title": "Tool name",
+            "url": "https://official-url.com",
+            "description": "One sentence description",
+            "isFree": true,
+            "isOfficial": true
+          }
+        ]
       }
     `;
 
@@ -80,54 +113,62 @@ export async function POST(req: Request) {
     let success = false;
     let lastError = "";
 
-    // 2. THE LOOP (Dynamic Fallback)
-    // We iterate through the list Google gave us.
+    // Try each model in priority order, stop on first success
     for (const modelName of modelList) {
-        try {
-            console.log(`🔄 Attempting Model: ${modelName}...`);
-            const model = genAI.getGenerativeModel({ model: modelName });
-            
-            const result = await model.generateContent(prompt);
-            textResponse = result.response.text();
-            
-            console.log(`✅ Success with ${modelName}!`);
-            success = true;
-            break; // Stop loop on success
-
-        } catch (error: any) {
-            console.warn(`⚠️ ${modelName} Failed: ${error.message.split(' ')[0]}`);
-            lastError = error.message;
-            // Loop automatically tries the next model in 'modelList'
-        }
+      try {
+        console.log(`🔄 Trying model: ${modelName}...`);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        textResponse = result.response.text();
+        console.log(`✅ Success with ${modelName}`);
+        success = true;
+        break;
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`⚠️ ${modelName} failed: ${message.split(" ")[0]}`);
+        lastError = message;
+      }
     }
 
     if (!success) {
-        return NextResponse.json(
-            { error: "Service busy. Please try again.", details: lastError },
-            { status: 503 }
-        );
+      return NextResponse.json(
+        { error: "All models unavailable. Please try again.", details: lastError },
+        { status: 503 }
+      );
     }
 
-    // 3. Clean and Parse JSON
+    // Clean markdown code fences if present
     const cleanJson = textResponse
-        .replace(/```json/g, '')
-        .replace(/```/g, '')
-        .trim();
-    
-    // Extract JSON between braces just in case of extra text
-    const firstBrace = cleanJson.indexOf('{');
-    const lastBrace = cleanJson.lastIndexOf('}');
-    const finalJsonString = (firstBrace !== -1 && lastBrace !== -1) 
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+    // Extract JSON between first { and last } in case of extra text
+    const firstBrace = cleanJson.indexOf("{");
+    const lastBrace = cleanJson.lastIndexOf("}");
+    const finalJsonString =
+      firstBrace !== -1 && lastBrace !== -1
         ? cleanJson.substring(firstBrace, lastBrace + 1)
         : cleanJson;
 
-    const data = JSON.parse(finalJsonString);
-    return NextResponse.json(data);
+    // --- Safe JSON Parse (was missing before — would crash on bad AI output) ---
+    let data: unknown;
+    try {
+      data = JSON.parse(finalJsonString);
+    } catch {
+      console.error("❌ AI returned invalid JSON:", finalJsonString.slice(0, 200));
+      return NextResponse.json(
+        { error: "AI returned invalid response. Please try again." },
+        { status: 500 }
+      );
+    }
 
-  } catch (error: any) {
-    console.error("❌ API Error:", error);
+    return NextResponse.json(data);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("❌ API Error:", message);
     return NextResponse.json(
-      { error: "Failed to generate results", details: error.message },
+      { error: "Failed to generate results", details: message },
       { status: 500 }
     );
   }
